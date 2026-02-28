@@ -82,6 +82,63 @@ jobs:
         path: dist
         if-no-files-found: error
 
+  ios:
+    name: "ios-${{ matrix.build.abi }}"
+    runs-on: ${{ matrix.build.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - abi: arm64
+            runner: macos-15
+            target: ios64-xcrun
+            sdk: iphoneos
+          - abi: simulator-arm64
+            runner: macos-15
+            target: iossimulator-arm64-xcrun
+            sdk: iphonesimulator
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - name: show xcode info
+      shell: bash
+      run: |
+        set -euo pipefail
+        xcodebuild -version
+        xcrun --sdk ${{ matrix.build.sdk }} --show-sdk-path
+    - name: config
+      shell: bash
+      run: |
+        set -euo pipefail
+        ./Configure ${{ matrix.build.target }} \
+          --banner=Configured \
+          no-shared no-tests no-apps no-module no-fips
+        perl configdata.pm --dump
+    - name: make
+      run: make -s -j4
+    - name: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist/lib dist/include
+        cp libcrypto.a libssl.a dist/lib/
+        cp -R include/openssl dist/include/
+        cat > dist/build-info.txt <<'EOF'
+        platform=ios
+        abi=${{ matrix.build.abi }}
+        target=${{ matrix.build.target }}
+        sdk=${{ matrix.build.sdk }}
+        runner=${{ matrix.build.runner }}
+        commit=${{ github.sha }}
+        EOF
+    - name: save artifacts
+      uses: actions/upload-artifact@v5
+      with:
+        name: "openssl-static-ios-${{ matrix.build.abi }}"
+        path: dist
+        if-no-files-found: error
+
   windows:
     name: "windows-${{ matrix.build.abi }}"
     runs-on: windows-2022
