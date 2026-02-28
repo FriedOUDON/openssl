@@ -1,0 +1,300 @@
+# Copyright 2026 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
+name: Static Libraries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    name: "${{ matrix.build.platform }}-${{ matrix.build.abi }}"
+    runs-on: ${{ matrix.build.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - platform: linux
+            abi: x86_64
+            runner: ubuntu-latest
+            target: linux-x86_64
+            cc: gcc
+          - platform: linux
+            abi: arm64
+            runner: ubuntu-24.04-arm
+            target: linux-aarch64
+            cc: gcc
+          - platform: macos
+            abi: x86_64
+            runner: macos-13
+            target: darwin64-x86_64-cc
+            cc: clang
+          - platform: macos
+            abi: arm64
+            runner: macos-14
+            target: darwin64-arm64-cc
+            cc: clang
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - name: config
+      shell: bash
+      run: |
+        set -euo pipefail
+        CC=${{ matrix.build.cc }} \
+        ./Configure ${{ matrix.build.target }} \
+          --strict-warnings \
+          --banner=Configured \
+          no-shared no-tests no-apps no-module no-fips
+        perl configdata.pm --dump
+    - name: make
+      run: make -s -j4
+    - name: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist/lib dist/include
+        cp libcrypto.a libssl.a dist/lib/
+        cp -R include/openssl dist/include/
+        cat > dist/build-info.txt <<'EOF'
+        platform=${{ matrix.build.platform }}
+        abi=${{ matrix.build.abi }}
+        target=${{ matrix.build.target }}
+        runner=${{ matrix.build.runner }}
+        commit=${{ github.sha }}
+        EOF
+    - name: save artifacts
+      uses: actions/upload-artifact@v5
+      with:
+        name: "openssl-static-${{ matrix.build.platform }}-${{ matrix.build.abi }}"
+        path: dist
+        if-no-files-found: error
+
+  windows:
+    name: "windows-${{ matrix.build.abi }}"
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - abi: x64
+            target: VC-WIN64A
+            vcvars: C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat
+          - abi: x86
+            target: VC-WIN32
+            vcvars: C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - name: install nasm
+      run: |
+        choco install nasm ${{ matrix.build.abi == 'x86' && '--x86' || '' }}
+        "C:\Program Files${{ matrix.build.abi == 'x86' && ' (x86)' || '' }}\NASM" | Out-File -FilePath "$env:GITHUB_PATH" -Append
+    - name: prepare the build directory
+      run: mkdir _build
+    - name: config
+      working-directory: _build
+      shell: cmd
+      run: |
+        call "${{ matrix.build.vcvars }}"
+        perl ..\Configure --strict-warnings --banner=Configured no-makedepend no-shared no-tests no-apps no-module no-fips ${{ matrix.build.target }}
+        perl configdata.pm --dump
+    - name: build
+      working-directory: _build
+      shell: cmd
+      run: |
+        call "${{ matrix.build.vcvars }}"
+        nmake /S
+    - name: stage
+      shell: powershell
+      run: |
+        New-Item -ItemType Directory -Path "dist\lib" -Force | Out-Null
+        New-Item -ItemType Directory -Path "dist\include" -Force | Out-Null
+
+        $libs = Get-ChildItem -Path "_build" -File -Filter "lib*.lib" |
+          Where-Object { $_.Name -match '^lib(crypto|ssl).*\.lib$' }
+        if (-not $libs) {
+          throw "No static library files were produced in _build"
+        }
+        $libs | Copy-Item -Destination "dist\lib\"
+        $includeDir = "_build\include\openssl"
+        if (-not (Test-Path $includeDir)) {
+          $includeDir = "include\openssl"
+        }
+        Copy-Item -Path $includeDir -Destination "dist\include\" -Recurse -Force
+
+        @"
+        platform=windows
+        abi=${{ matrix.build.abi }}
+        target=${{ matrix.build.target }}
+        runner=windows-2022
+        commit=${{ github.sha }}
+        "@ | Set-Content -Path "dist\build-info.txt" -Encoding ascii
+    - name: save artifacts
+      uses: actions/upload-artifact@v5
+      with:
+        name: "openssl-static-windows-${{ matrix.build.abi }}"
+        path: dist
+        if-no-files-found: error
+
+  windows-mingw:
+    name: "windows-mingw-${{ matrix.build.abi }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - abi: x64
+            target: mingw64
+            cross_prefix: x86_64-w64-mingw32-
+          - abi: x86
+            target: mingw
+            cross_prefix: i686-w64-mingw32-
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - name: install packages
+      run: |
+        sudo apt-get update
+        sudo apt-get -yq --no-install-suggests --no-install-recommends install \
+          gcc-mingw-w64-x86-64 \
+          gcc-mingw-w64-i686
+    - name: config
+      shell: bash
+      run: |
+        set -euo pipefail
+        ./Configure ${{ matrix.build.target }} \
+          --cross-compile-prefix=${{ matrix.build.cross_prefix }} \
+          --strict-warnings \
+          --banner=Configured \
+          no-shared no-tests no-apps no-module no-fips
+        perl configdata.pm --dump
+    - name: make
+      run: make -s -j4
+    - name: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist/lib dist/include
+        shopt -s nullglob
+        libs=(libcrypto*.a libssl*.a)
+        if [ ${#libs[@]} -eq 0 ]; then
+          echo "No MinGW static libraries were produced" >&2
+          exit 1
+        fi
+        cp "${libs[@]}" dist/lib/
+        cp -R include/openssl dist/include/
+        cat > dist/build-info.txt <<'EOF'
+        platform=windows-mingw
+        abi=${{ matrix.build.abi }}
+        target=${{ matrix.build.target }}
+        cross_prefix=${{ matrix.build.cross_prefix }}
+        runner=ubuntu-latest
+        commit=${{ github.sha }}
+        EOF
+    - name: save artifacts
+      uses: actions/upload-artifact@v5
+      with:
+        name: "openssl-static-windows-mingw-${{ matrix.build.abi }}"
+        path: dist
+        if-no-files-found: error
+
+  android:
+    name: "android-${{ matrix.build.abi }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - abi: arm64-v8a
+            target: android-arm64
+            api: "21"
+          - abi: armeabi-v7a
+            target: android-arm
+            api: "21"
+          - abi: x86
+            target: android-x86
+            api: "21"
+          - abi: x86_64
+            target: android-x86_64
+            api: "21"
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - name: setup android sdk
+      uses: android-actions/setup-android@v3
+    - name: install ndk
+      shell: bash
+      run: |
+        set -euo pipefail
+        sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+        if [ -z "${sdk_root}" ]; then
+          echo "ANDROID_SDK_ROOT and ANDROID_HOME are not set" >&2
+          exit 1
+        fi
+
+        ndk_root=""
+        if [ -d "${sdk_root}/ndk" ]; then
+          ndk_root="$(find "${sdk_root}/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1 || true)"
+        fi
+
+        if [ -z "${ndk_root}" ]; then
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;27.2.12479018"
+          ndk_root="${sdk_root}/ndk/27.2.12479018"
+        fi
+
+        if [ ! -d "${ndk_root}" ]; then
+          echo "Android NDK directory not found: ${ndk_root}" >&2
+          exit 1
+        fi
+
+        echo "ANDROID_NDK_ROOT=${ndk_root}" >> "${GITHUB_ENV}"
+        echo "${ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "${GITHUB_PATH}"
+    - name: config
+      shell: bash
+      run: |
+        set -euo pipefail
+        ./Configure ${{ matrix.build.target }} \
+          -D__ANDROID_API__=${{ matrix.build.api }} \
+          --strict-warnings \
+          --banner=Configured \
+          no-shared no-tests no-apps no-module no-fips
+        perl configdata.pm --dump
+    - name: make
+      run: make -s -j4
+    - name: stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist/lib dist/include
+        cp libcrypto.a libssl.a dist/lib/
+        cp -R include/openssl dist/include/
+        cat > dist/build-info.txt <<'EOF'
+        platform=android
+        abi=${{ matrix.build.abi }}
+        target=${{ matrix.build.target }}
+        android_api=${{ matrix.build.api }}
+        commit=${{ github.sha }}
+        EOF
+    - name: save artifacts
+      uses: actions/upload-artifact@v5
+      with:
+        name: "openssl-static-android-${{ matrix.build.abi }}"
+        path: dist
+        if-no-files-found: error
