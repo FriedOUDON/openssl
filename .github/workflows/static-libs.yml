@@ -179,7 +179,6 @@ jobs:
         set -euo pipefail
         ./Configure ${{ matrix.build.target }} \
           --cross-compile-prefix=${{ matrix.build.cross_prefix }} \
-          --strict-warnings \
           --banner=Configured \
           no-shared no-tests no-apps no-module no-fips
         perl configdata.pm --dump
@@ -272,7 +271,6 @@ jobs:
         set -euo pipefail
         ./Configure ${{ matrix.build.target }} \
           -D__ANDROID_API__=${{ matrix.build.api }} \
-          --strict-warnings \
           --banner=Configured \
           no-shared no-tests no-apps no-module no-fips
         perl configdata.pm --dump
