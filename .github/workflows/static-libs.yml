@@ -37,12 +37,12 @@ jobs:
             cc: gcc
           - platform: macos
             abi: x86_64
-            runner: macos-13
+            runner: macos-15-intel
             target: darwin64-x86_64-cc
             cc: clang
           - platform: macos
             abi: arm64
-            runner: macos-14
+            runner: macos-15
             target: darwin64-arm64-cc
             cc: clang
     steps:
